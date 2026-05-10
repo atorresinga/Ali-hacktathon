@@ -1,5 +1,7 @@
 import * as XLSX from "xlsx";
 
+import type { SaleRow } from "@/lib/salesLog";
+
 export function downloadTextFile(filename: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -56,5 +58,43 @@ export function downloadPriceForecastXlsx(filename: string, params: Parameters<t
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(fc), "pronostico");
   const meta = [{ campo: "variedad", valor: params.variety }, { campo: "mercado", valor: params.market }];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(meta), "datos");
+  XLSX.writeFile(wb, filename);
+}
+
+export function buildSalesCsv(rows: SaleRow[]): string {
+  const lines: string[] = ["fecha,producto,kg,precio_S_per_kg,comprador,total_S"];
+  for (const r of rows) {
+    lines.push(
+      [
+        r.date,
+        escapeCsv(r.product),
+        r.kg,
+        r.pricePerKg,
+        escapeCsv(r.buyer),
+        (r.kg * r.pricePerKg).toFixed(2),
+      ].join(",")
+    );
+  }
+  return lines.join("\n");
+}
+
+export function downloadSalesXlsx(filename: string, rows: SaleRow[]) {
+  const wb = XLSX.utils.book_new();
+  const data = rows.map((r) => ({
+    fecha: r.date,
+    producto: r.product,
+    kg: r.kg,
+    precio_S_kg: r.pricePerKg,
+    comprador: r.buyer,
+    total_S: Number((r.kg * r.pricePerKg).toFixed(2)),
+  }));
+  if (data.length === 0) {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ["fecha", "producto", "kg", "precio_S_kg", "comprador", "total_S"],
+    ]);
+    XLSX.utils.book_append_sheet(wb, ws, "ventas");
+  } else {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data), "ventas");
+  }
   XLSX.writeFile(wb, filename);
 }

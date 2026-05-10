@@ -4,12 +4,14 @@
   "scripts": {
     "build:frontend": "npm run build --prefix frontend",
     "cap:sync": "npm run build:frontend && npx cap sync ios",
+    "cap:sync:local": "VITE_API_BASE=http://127.0.0.1:8000 npm run build --prefix frontend && npx cap sync ios",
     "cap:open": "npx cap open ios",
-    "ios:run": "npm run cap:sync && npx cap open ios"
+    "ios:run": "npm run cap:sync:local && npx cap open ios"
   },
   "dependencies": {
     "@capacitor/cli": "^8.3.3",
     "@capacitor/core": "^8.3.3",
-    "@capacitor/ios": "^8.3.3"
+    "@capacitor/ios": "^8.3.3",
+    "@capacitor/local-notifications": "^8.1.0"
   }
 }

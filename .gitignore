@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .env
+frontend/.env.production.local
 .venv/
 venv/
 data/*.sqlite3

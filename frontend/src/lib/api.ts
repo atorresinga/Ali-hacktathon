@@ -1,8 +1,44 @@
+import { Capacitor } from "@capacitor/core";
+
+type CapWindow = Window & { Capacitor?: { isNativePlatform?: () => boolean } };
+
+const DEV_LOOPBACK = "http://127.0.0.1:8000";
+
 /**
- * API base: empty string uses Vite dev proxy (/api -> backend).
- * Production build: set VITE_API_BASE=https://your-api-host
+ * Resolve on every request (never cache at module load): the native bridge may not be
+ * ready when modules first evaluate, so an eager `API_BASE` constant stayed "" → demo mode.
+ *
+ * Detection order: `VITE_API_BASE` → `capacitor:` / `ionic:` URL → `window.Capacitor` → imported API.
+ *
+ * - `npm run dev`: empty → relative `/api` → Vite proxy.
+ * - Capacitor iOS Simulator: loopback reaches the Mac’s uvicorn.
+ * - Physical iPhone: set `VITE_API_BASE=http://<Mac-LAN>:8000` (127.0.0.1 is the phone itself).
  */
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
+export function getApiBase(): string {
+  const env = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
+  if (env) return env.replace(/\/$/, "");
+  if (typeof window === "undefined") return "";
+
+  const proto = window.location?.protocol || "";
+  if (proto === "capacitor:" || proto === "ionic:") {
+    return DEV_LOOPBACK;
+  }
+
+  const w = window as CapWindow;
+  if (w.Capacitor?.isNativePlatform?.()) {
+    return DEV_LOOPBACK;
+  }
+
+  try {
+    if (Capacitor.isNativePlatform()) {
+      return DEV_LOOPBACK;
+    }
+  } catch {
+    /* bridge not ready */
+  }
+
+  return "";
+}
 
 export type FarmerInsight = {
   language: string;
@@ -31,7 +67,7 @@ export type FarmerInsight = {
 };
 
 export async function fetchVarieties(market = "GMML_Lima"): Promise<string[]> {
-  const r = await fetch(`${API_BASE}/api/v1/meta/varieties?market=${encodeURIComponent(market)}`);
+  const r = await fetch(`${getApiBase()}/api/v1/meta/varieties?market=${encodeURIComponent(market)}`);
   if (!r.ok) throw new Error(`varieties ${r.status}`);
   const j = (await r.json()) as { varieties: string[] };
   return j.varieties;
@@ -42,7 +78,7 @@ export async function fetchSeriesDaily(
   market = "GMML_Lima"
 ): Promise<{ ds: string; price_soles_per_kg: number }[]> {
   const r = await fetch(
-    `${API_BASE}/api/v1/series/daily?variety=${encodeURIComponent(variety)}&market=${encodeURIComponent(market)}`
+    `${getApiBase()}/api/v1/series/daily?variety=${encodeURIComponent(variety)}&market=${encodeURIComponent(market)}`
   );
   if (!r.ok) throw new Error(`series ${r.status}`);
   const j = (await r.json()) as { series: { ds: string; price_soles_per_kg: number }[] };
@@ -55,7 +91,7 @@ export async function fetchFarmerInsight(
   lang = "es"
 ): Promise<FarmerInsight> {
   const r = await fetch(
-    `${API_BASE}/api/v1/insights/farmer?variety=${encodeURIComponent(variety)}&market=${encodeURIComponent(market)}&lang=${encodeURIComponent(lang)}`
+    `${getApiBase()}/api/v1/insights/farmer?variety=${encodeURIComponent(variety)}&market=${encodeURIComponent(market)}&lang=${encodeURIComponent(lang)}`
   );
   if (!r.ok) throw new Error(`insight ${r.status}`);
   return r.json() as Promise<FarmerInsight>;
@@ -64,7 +100,7 @@ export async function fetchFarmerInsight(
 export type UiLabels = Record<string, string>;
 
 export async function fetchLabels(lang: string): Promise<UiLabels> {
-  const r = await fetch(`${API_BASE}/api/v1/i18n/labels?lang=${encodeURIComponent(lang)}`);
+  const r = await fetch(`${getApiBase()}/api/v1/i18n/labels?lang=${encodeURIComponent(lang)}`);
   if (!r.ok) throw new Error(`labels ${r.status}`);
   const j = (await r.json()) as { labels: UiLabels };
   return j.labels;
@@ -83,7 +119,7 @@ export async function fetchForecast(
   lang = "es"
 ): Promise<ForecastResponse> {
   const r = await fetch(
-    `${API_BASE}/api/v1/forecast?variety=${encodeURIComponent(variety)}&market=${encodeURIComponent(market)}&lang=${encodeURIComponent(lang)}`
+    `${getApiBase()}/api/v1/forecast?variety=${encodeURIComponent(variety)}&market=${encodeURIComponent(market)}&lang=${encodeURIComponent(lang)}`
   );
   if (!r.ok) throw new Error(`forecast ${r.status}`);
   return r.json() as Promise<ForecastResponse>;
@@ -99,7 +135,7 @@ export type DataHealth = {
 };
 
 export async function fetchDataHealth(lang = "es"): Promise<DataHealth> {
-  const r = await fetch(`${API_BASE}/api/v1/meta/data-health?lang=${encodeURIComponent(lang)}`);
+  const r = await fetch(`${getApiBase()}/api/v1/meta/data-health?lang=${encodeURIComponent(lang)}`);
   if (!r.ok) throw new Error(`health ${r.status}`);
   const j = (await r.json()) as { data_health: DataHealth };
   return j.data_health;
@@ -114,13 +150,13 @@ export type SourcesResponse = {
 };
 
 export async function fetchSources(lang = "es"): Promise<SourcesResponse> {
-  const r = await fetch(`${API_BASE}/api/v1/config/sources?lang=${encodeURIComponent(lang)}`);
+  const r = await fetch(`${getApiBase()}/api/v1/config/sources?lang=${encodeURIComponent(lang)}`);
   if (!r.ok) throw new Error(`sources ${r.status}`);
   return r.json() as Promise<SourcesResponse>;
 }
 
 export async function fetchMarkets(lang = "es"): Promise<string[]> {
-  const r = await fetch(`${API_BASE}/api/v1/meta/markets?lang=${encodeURIComponent(lang)}`);
+  const r = await fetch(`${getApiBase()}/api/v1/meta/markets?lang=${encodeURIComponent(lang)}`);
   if (!r.ok) throw new Error(`markets ${r.status}`);
   const j = (await r.json()) as { markets: string[] };
   return j.markets;
@@ -137,7 +173,7 @@ export type IngestRun = {
 
 export async function fetchIngestRecent(lang = "es", limit = 25): Promise<IngestRun[]> {
   const r = await fetch(
-    `${API_BASE}/api/v1/meta/ingest-recent?limit=${limit}&lang=${encodeURIComponent(lang)}`
+    `${getApiBase()}/api/v1/meta/ingest-recent?limit=${limit}&lang=${encodeURIComponent(lang)}`
   );
   if (!r.ok) throw new Error(`ingest ${r.status}`);
   const j = (await r.json()) as { runs: IngestRun[] };

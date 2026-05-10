@@ -12,12 +12,20 @@ import {
   fetchSeriesDaily,
   fetchSources,
   fetchVarieties,
+  getApiBase,
   type FarmerInsight,
   type ForecastResponse,
   type IngestRun,
   type UiLabels,
 } from "@/lib/api";
-import { buildPriceForecastCsv, downloadPriceForecastXlsx, downloadTextFile } from "@/lib/export";
+import {
+  buildPriceForecastCsv,
+  buildSalesCsv,
+  downloadPriceForecastXlsx,
+  downloadSalesXlsx,
+  downloadTextFile,
+} from "@/lib/export";
+import { readNotificationPermission, requestMarketAlerts, type NotifPermissionUi } from "@/lib/notifications";
 import { addSale, clearSales, loadSales, type SaleRow } from "@/lib/salesLog";
 
 type Lang = "es" | "qu" | "ay";
@@ -83,6 +91,8 @@ function normVarietyKey(v: string): string {
 /** Distinct emoji per commercial potato name (Unicode limits “exact” depiction). */
 function emojiForVariety(v: string): string {
   const n = normVarietyKey(v);
+  if (n.includes("maiz") || n.includes("choclo")) return "🌽";
+  if (n.includes("quinua") || n.includes("kinwa")) return "🌾";
   if (n.includes("amarilla")) return "🟡";
   if (n.includes("canchan")) return "🟤";
   if (n.includes("yungay")) return "⚪";
@@ -283,16 +293,16 @@ export default function RuralPricingApp() {
   const [saleKg, setSaleKg] = useState("");
   const [salePrice, setSalePrice] = useState("");
   const [saleBuyer, setSaleBuyer] = useState("");
-  const [notifSupported, setNotifSupported] = useState(false);
-  const [notifPermission, setNotifPermission] = useState<NotificationPermission | "unsupported">("default");
+  const [notifUi, setNotifUi] = useState<NotifPermissionUi>("prompt");
 
   useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      setNotifSupported(true);
-      setNotifPermission(Notification.permission);
-    } else {
-      setNotifPermission("unsupported");
-    }
+    let cancelled = false;
+    void readNotificationPermission().then((p) => {
+      if (!cancelled) setNotifUi(p);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -440,22 +450,12 @@ export default function RuralPricingApp() {
   const priceSeries21 = useMemo(() => priceSeriesAll.slice(-21), [priceSeriesAll]);
 
   const onBellNotifications = useCallback(async () => {
-    if (!notifSupported || notifPermission === "unsupported") {
-      setTab("home");
-      return;
-    }
-    const perm = await Notification.requestPermission();
-    setNotifPermission(perm);
-    if (perm === "granted") {
-      try {
-        new Notification(L(labels, "notif_demo_title", "Alertas del mercado"), {
-          body: L(labels, "notif_demo_body", "Le avisaremos cuando revise precios y datos nuevos."),
-        });
-      } catch {
-        /* WebView may block */
-      }
-    }
-  }, [notifSupported, notifPermission, labels]);
+    const next = await requestMarketAlerts({
+      title: L(labels, "notif_demo_title", "Alertas del mercado"),
+      body: L(labels, "notif_demo_body", "Le avisaremos cuando revise precios y datos nuevos."),
+    });
+    setNotifUi(next);
+  }, [labels]);
 
   const alerts = useMemo(() => {
     const fb = [
@@ -548,9 +548,13 @@ export default function RuralPricingApp() {
             className="rounded-2xl bg-white/15 p-3 backdrop-blur transition hover:bg-white/25"
             aria-label={L(labels, "alerts_aria", "Activar alertas")}
             title={
-              notifPermission === "granted"
+              notifUi === "granted"
                 ? L(labels, "notif_on", "Notificaciones activadas")
-                : L(labels, "notif_tap", "Toque para permitir avisos")
+                : notifUi === "denied"
+                  ? L(labels, "notif_open_settings", "Permita avisos en Ajustes del teléfono")
+                  : notifUi === "unsupported"
+                    ? L(labels, "notif_unsupported", "Avisos no disponibles en este navegador")
+                    : L(labels, "notif_tap", "Toque para permitir avisos")
             }
           >
             <span className="text-lg leading-none" aria-hidden="true">
@@ -588,7 +592,7 @@ export default function RuralPricingApp() {
               {loading
                 ? L(labels, "status_loading", "Cargando datos del servidor…")
                 : loadError
-                  ? L(labels, "status_demo", "Modo demo").replace("{error}", loadError)
+                  ? `${L(labels, "status_demo", "Modo demo").replace("{error}", loadError)} · API ${getApiBase() || "—"}`
                   : `${formatMarketLabel(selectedMarket)} · ${L(labels, "status_backend", "Datos del backend")}`}
             </span>
           )}
@@ -598,7 +602,7 @@ export default function RuralPricingApp() {
             {loading
               ? L(labels, "status_loading", "Cargando datos del servidor…")
               : loadError
-                ? L(labels, "status_demo", "Modo demo").replace("{error}", loadError)
+                ? `${L(labels, "status_demo", "Modo demo").replace("{error}", loadError)} · API ${getApiBase() || "—"}`
                 : L(labels, "status_backend_hint", "Precios y pronóstico usan el mercado elegido.")}
           </p>
         )}
@@ -1038,6 +1042,30 @@ export default function RuralPricingApp() {
     <main className="space-y-4 px-4 pt-4 pb-4 sm:px-5 sm:pt-5 sm:pb-6">
       <h2 className="text-lg font-bold">{L(labels, "sales_title", "Mis ventas")}</h2>
       <p className="text-sm leading-relaxed text-slate-600">{L(labels, "sales_subtitle", "")}</p>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          className="h-10 flex-1 rounded-2xl border border-emerald-200 bg-white text-xs font-bold text-emerald-900 sm:flex-none"
+          disabled={sales.length === 0}
+          onClick={() => {
+            const stamp = new Date().toISOString().slice(0, 10);
+            downloadTextFile(`ventas_${stamp}.csv`, buildSalesCsv(sales), "text/csv;charset=utf-8");
+          }}
+        >
+          {L(labels, "sales_export_csv", "Descargar CSV")}
+        </Button>
+        <Button
+          type="button"
+          className="h-10 flex-1 rounded-2xl bg-emerald-700 text-xs font-bold text-white hover:bg-emerald-800 sm:flex-none"
+          disabled={sales.length === 0}
+          onClick={() => {
+            const stamp = new Date().toISOString().slice(0, 10);
+            downloadSalesXlsx(`ventas_${stamp}.xlsx`, sales);
+          }}
+        >
+          {L(labels, "sales_export_xlsx", "Descargar Excel")}
+        </Button>
+      </div>
       <Card className="rounded-3xl border-0 bg-white shadow-lg">
         <CardContent className="space-y-3 p-4">
           <input
@@ -1096,13 +1124,20 @@ export default function RuralPricingApp() {
         <div className="space-y-2">
           {sales.map((s) => (
             <Card key={s.id} className="rounded-2xl border-0 bg-white shadow">
-              <CardContent className="p-3 text-xs">
-                <div className="font-bold text-slate-800">{s.date}</div>
-                <div>
-                  {s.product} · {s.kg} kg @ {soles(s.pricePerKg)}
+              <CardContent className="flex gap-3 p-3 text-xs">
+                <span className="text-2xl leading-none" aria-hidden="true">
+                  {emojiForVariety(s.product)}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-bold text-slate-800">{s.date}</div>
+                  <div>
+                    {s.product} · {s.kg} kg @ {soles(s.pricePerKg)}
+                  </div>
+                  <div className="text-slate-600">{s.buyer}</div>
+                  <div className="mt-1 font-semibold text-emerald-800">
+                    {L(labels, "sales_total", "Total")}: {soles(s.kg * s.pricePerKg)}
+                  </div>
                 </div>
-                <div className="text-slate-600">{s.buyer}</div>
-                <div className="mt-1 font-semibold text-emerald-800">{L(labels, "sales_total", "Total")}: {soles(s.kg * s.pricePerKg)}</div>
               </CardContent>
             </Card>
           ))}
