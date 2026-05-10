@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "andean-potato"
+version = "0.1.0"
+description = "MIDAGRI/SISAP-aligned potato wholesale MVP (ETL, API, i18n backend)"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.0.0",
+  "numpy>=1.24.0",
+  "requests>=2.31.0",
+  "beautifulsoup4>=4.12.0",
+  "lxml>=4.9.0",
+  "fastapi>=0.110.0",
+  "httpx>=0.27.0",
+  "uvicorn[standard]>=0.27.0",
+  "python-dotenv>=1.0.0",
+  "statsmodels>=0.14.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+ui = ["streamlit>=1.32.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["andean_potato*", "backend*"]
