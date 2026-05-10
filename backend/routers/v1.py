@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from andean_potato.database import connect, init_db, last_successful_ingest
 from andean_potato.etl.ingest import data_health_summary, run_default_ingest
 from andean_potato.forecast import forecast_price_horizons
-from andean_potato.queries import daily_price_volume, list_varieties
+from andean_potato.queries import daily_price_volume, list_markets, list_varieties
 from backend.dependencies import language_dependency
 from backend.i18n.strings import t, ui_strings
 from backend.services.farmer_insight import build_farmer_insight
@@ -36,14 +36,20 @@ def config_sources(lang: str = Depends(language_dependency)) -> dict[str, Any]:
         SISAP_PORTAL2_MAYORISTA,
     )
 
+    url_map = {
+        "sisap_portal": SISAP_PORTAL,
+        "sisap_portal2_mayorista": SISAP_PORTAL2_MAYORISTA,
+        "midagri_gobpe": MIDAGRI_GOBPE_INSTITUTION,
+        "emmsa_home": EMMSA_HOME,
+    }
+    links = [
+        {"id": k, "title": t(lang, f"source.{k}"), "url": v}
+        for k, v in url_map.items()
+    ]
     return {
         "language": lang,
-        "urls": {
-            "sisap_portal": SISAP_PORTAL,
-            "sisap_portal2_mayorista": SISAP_PORTAL2_MAYORISTA,
-            "midagri_gobpe": MIDAGRI_GOBPE_INSTITUTION,
-            "emmsa_home": EMMSA_HOME,
-        },
+        "urls": url_map,
+        "links": links,
         "attribution": "Datos: MIDAGRI / SISAP (y fuentes complementarias).",
         "ui_hint_sources_title": t(lang, "ui.sources"),
     }
@@ -52,6 +58,32 @@ def config_sources(lang: str = Depends(language_dependency)) -> dict[str, Any]:
 @router.post("/ingest/run")
 def ingest_run_v1() -> dict[str, Any]:
     return run_default_ingest()
+
+
+@router.get("/meta/markets")
+def meta_markets_v1(lang: str = Depends(language_dependency)) -> dict[str, Any]:
+    with connect() as conn:
+        markets = list_markets(conn)
+    return {"language": lang, "markets": markets}
+
+
+@router.get("/meta/ingest-recent")
+def meta_ingest_recent_v1(
+    limit: int = Query(25, ge=1, le=80),
+    lang: str = Depends(language_dependency),
+) -> dict[str, Any]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, source, status, detail, started_at, finished_at
+            FROM ingest_runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    runs = [dict(r) for r in rows]
+    return {"language": lang, "runs": runs}
 
 
 @router.get("/meta/varieties")

@@ -7,7 +7,18 @@ from datetime import date, datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
-VARIETIES = ["Papa Canchan", "Papa Yungay", "Papa Amarilla"]
+# Commercial potato names (Peru GMML-style demo series); distinct series per variety.
+VARIETY_BASE_SOLES_PER_KG: dict[str, float] = {
+    "Papa Canchan": 1.15,
+    "Papa Yungay": 1.35,
+    "Papa Amarilla": 2.1,
+    "Papa Huayro": 1.52,
+    "Papa Peruanita": 1.88,
+    "Papa Tumbay": 1.41,
+    "Papa Nevadita": 1.26,
+    "Papa Sumac Sara": 1.64,
+}
+VARIETIES = list(VARIETY_BASE_SOLES_PER_KG.keys())
 REGIONS = ["Junín", "Huánuco", "Puno", "Ayacucho"]
 
 
@@ -27,7 +38,7 @@ def build_demo_lima_gmml_frame(
         for variety in VARIETIES:
             # Cobweb-ish: periodic glut + noise
             t = np.sin(2 * np.pi * dt.dayofyear / 365.0)
-            base = {"Papa Canchan": 1.15, "Papa Yungay": 1.35, "Papa Amarilla": 2.1}[variety]
+            base = VARIETY_BASE_SOLES_PER_KG[variety]
             price = base * (1.0 + 0.22 * t) + rng.normal(0, 0.06)
             price = float(max(0.35, price))
             vol = max(0.0, 180 + 120 * (-t) + rng.normal(0, 25))

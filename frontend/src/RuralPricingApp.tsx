@@ -1,18 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import PriceTrendChart from "@/components/PriceTrendChart";
 import {
   fetchDataHealth,
   fetchFarmerInsight,
   fetchForecast,
+  fetchIngestRecent,
   fetchLabels,
+  fetchMarkets,
   fetchSeriesDaily,
   fetchSources,
   fetchVarieties,
   type FarmerInsight,
   type ForecastResponse,
+  type IngestRun,
   type UiLabels,
 } from "@/lib/api";
+import { buildPriceForecastCsv, downloadPriceForecastXlsx, downloadTextFile } from "@/lib/export";
 import { addSale, clearSales, loadSales, type SaleRow } from "@/lib/salesLog";
 
 type Lang = "es" | "qu" | "ay";
@@ -68,8 +73,29 @@ const DEFAULT_COSTS: Record<(typeof COST_KEYS)[number], number> = {
   cost_labor: 0.33,
 };
 
-function emojiForVariety(_v: string): string {
+function normVarietyKey(v: string): string {
+  return v
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "");
+}
+
+/** Distinct emoji per commercial potato name (Unicode limits “exact” depiction). */
+function emojiForVariety(v: string): string {
+  const n = normVarietyKey(v);
+  if (n.includes("amarilla")) return "🟡";
+  if (n.includes("canchan")) return "🟤";
+  if (n.includes("yungay")) return "⚪";
+  if (n.includes("huayro")) return "🔴";
+  if (n.includes("peruanita")) return "🟣";
+  if (n.includes("tumbay")) return "🟠";
+  if (n.includes("nevadita")) return "💠";
+  if (n.includes("sumac")) return "🌄";
   return "🥔";
+}
+
+function formatMarketLabel(market: string): string {
+  return market.replace(/_/g, " ");
 }
 
 function fairBandFromInsight(insight: FarmerInsight): [number, number] {
@@ -93,10 +119,10 @@ function riskKeyFromInsight(insight: FarmerInsight): "low" | "medium" | "high" {
   return "low";
 }
 
-async function mapVarietyToCrop(variety: string, lang: string): Promise<Crop> {
+async function mapVarietyToCrop(variety: string, lang: string, market: string): Promise<Crop> {
   const [insight, series] = await Promise.all([
-    fetchFarmerInsight(variety, "GMML_Lima", lang),
-    fetchSeriesDaily(variety, "GMML_Lima"),
+    fetchFarmerInsight(variety, market, lang),
+    fetchSeriesDaily(variety, market),
   ]);
   const last = series.at(-1);
   const prev = series.at(-2);
@@ -105,8 +131,8 @@ async function mapVarietyToCrop(variety: string, lang: string): Promise<Crop> {
   const fair = fairBandFromInsight(insight);
   return {
     name: variety,
-    region: "Lima · GMML",
-    market: "Mayorista Lima",
+    region: formatMarketLabel(market),
+    market: market === "GMML_Lima" ? "Mayorista Lima" : formatMarketLabel(market),
     unit: "kg",
     today,
     yesterday,
@@ -120,6 +146,13 @@ async function mapVarietyToCrop(variety: string, lang: string): Promise<Crop> {
 
 function soles(value: number) {
   return `S/ ${Number(value).toFixed(2)}`;
+}
+
+function formatRunTimestamp(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("es-PE", { dateStyle: "short", timeStyle: "short" });
 }
 
 function L(labels: UiLabels, key: string, fallback: string) {
@@ -136,7 +169,12 @@ function buildNegotiationDraft(params: {
   const { insight, crop, suggestedPrice, quantity, labels } = params;
   const lines: string[] = [];
   lines.push(`${crop.name} · ${crop.market}`);
-  lines.push(L(labels, "recommended_price", "Precio recomendado") + `: ${soles(suggestedPrice)} / kg`);
+  lines.push(
+    `${L(labels, "negotiate_band", "Rango orientativo (negociación)")}: ${soles(crop.fair[0])} – ${soles(crop.fair[1])} / kg`
+  );
+  lines.push(
+    `${L(labels, "negotiate_reference", "Referencia sugerida")}: ${soles(suggestedPrice)} / kg (${L(labels, "negotiate_flexible", "el comprador puede ofrecer dentro del rango")})`
+  );
   lines.push(`${L(labels, "quantity_label", "Cantidad")}: ${quantity} kg`);
   if (insight?.localized?.sms) lines.push(insight.localized.sms);
   if (insight?.localized?.headline) lines.push(insight.localized.headline);
@@ -188,7 +226,7 @@ function BottomNav({
     { id: "sales", labelKey: "nav_sales", icon: "📦", def: "Ventas" },
   ];
   return (
-    <nav className="absolute bottom-0 left-0 right-0 z-30 rounded-t-3xl border-t bg-white px-5 pb-4 pt-3 shadow-[0_-10px_30px_rgba(0,0,0,0.08)]">
+    <nav className="fixed bottom-0 left-0 right-0 z-30 rounded-t-2xl border-t border-slate-200/80 bg-white/95 px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] shadow-[0_-8px_24px_rgba(0,0,0,0.06)] backdrop-blur-md sm:px-4">
       <div className="grid grid-cols-4 text-center text-[11px] font-medium text-slate-500">
         {items.map((item) => (
           <button
@@ -227,9 +265,15 @@ export default function RuralPricingApp() {
   const [costs, setCosts] = useState<Record<(typeof COST_KEYS)[number], number>>({ ...DEFAULT_COSTS });
   const [costEditorOpen, setCostEditorOpen] = useState(false);
 
-  const [marketsData, setMarketsData] = useState<{ sources: Awaited<ReturnType<typeof fetchSources>> | null; health: Awaited<ReturnType<typeof fetchDataHealth>> | null }>({ sources: null, health: null });
+  const [marketsList, setMarketsList] = useState<string[]>(["GMML_Lima"]);
+  const [selectedMarket, setSelectedMarket] = useState("GMML_Lima");
+  const [marketsData, setMarketsData] = useState<{
+    sources: Awaited<ReturnType<typeof fetchSources>> | null;
+    health: Awaited<ReturnType<typeof fetchDataHealth>> | null;
+    ingest: IngestRun[] | null;
+  }>({ sources: null, health: null, ingest: null });
   const [priceTabVariety, setPriceTabVariety] = useState<string>("");
-  const [priceSeries, setPriceSeries] = useState<{ ds: string; price_soles_per_kg: number }[]>([]);
+  const [priceSeriesAll, setPriceSeriesAll] = useState<{ ds: string; price_soles_per_kg: number }[]>([]);
   const [priceForecast, setPriceForecast] = useState<ForecastResponse | null>(null);
   const [priceLoading, setPriceLoading] = useState(false);
 
@@ -239,6 +283,17 @@ export default function RuralPricingApp() {
   const [saleKg, setSaleKg] = useState("");
   const [salePrice, setSalePrice] = useState("");
   const [saleBuyer, setSaleBuyer] = useState("");
+  const [notifSupported, setNotifSupported] = useState(false);
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission | "unsupported">("default");
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      setNotifSupported(true);
+      setNotifPermission(Notification.permission);
+    } else {
+      setNotifPermission("unsupported");
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -250,12 +305,30 @@ export default function RuralPricingApp() {
     };
   }, [lang]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void fetchMarkets(lang)
+      .then((m) => {
+        if (!cancelled && m.length) setMarketsList(m);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [lang]);
+
+  useEffect(() => {
+    if (marketsList.length && !marketsList.includes(selectedMarket)) {
+      setSelectedMarket(marketsList[0]);
+    }
+  }, [marketsList, selectedMarket]);
+
   const refreshPotatoes = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const vars = await fetchVarieties("GMML_Lima");
-      const potatoCrops = await Promise.all(vars.map((v) => mapVarietyToCrop(v, lang)));
+      const vars = await fetchVarieties(selectedMarket);
+      const potatoCrops = await Promise.all(vars.map((v) => mapVarietyToCrop(v, lang, selectedMarket)));
       const merged = [...potatoCrops, ...STATIC_DEMO];
       setCrops(merged);
       setSelectedCrop((prev) => {
@@ -273,7 +346,7 @@ export default function RuralPricingApp() {
     } finally {
       setLoading(false);
     }
-  }, [lang]);
+  }, [lang, selectedMarket]);
 
   useEffect(() => {
     void refreshPotatoes();
@@ -288,7 +361,7 @@ export default function RuralPricingApp() {
     let cancelled = false;
     void (async () => {
       try {
-        const ins = await fetchFarmerInsight(crop.apiVariety, "GMML_Lima", lang);
+        const ins = await fetchFarmerInsight(crop.apiVariety, selectedMarket, lang);
         if (!cancelled) setInsight(ins);
       } catch {
         if (!cancelled) setInsight(null);
@@ -297,17 +370,21 @@ export default function RuralPricingApp() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCrop, lang]);
+  }, [selectedCrop, lang, selectedMarket]);
 
   useEffect(() => {
     if (tab !== "markets") return;
     let cancelled = false;
     void (async () => {
       try {
-        const [sources, health] = await Promise.all([fetchSources(lang), fetchDataHealth(lang)]);
-        if (!cancelled) setMarketsData({ sources, health });
+        const [sources, health, ingest] = await Promise.all([
+          fetchSources(lang),
+          fetchDataHealth(lang),
+          fetchIngestRecent(lang, 25),
+        ]);
+        if (!cancelled) setMarketsData({ sources, health, ingest });
       } catch {
-        if (!cancelled) setMarketsData({ sources: null, health: null });
+        if (!cancelled) setMarketsData({ sources: null, health: null, ingest: null });
       }
     })();
     return () => {
@@ -322,16 +399,16 @@ export default function RuralPricingApp() {
     void (async () => {
       try {
         const [series, fc] = await Promise.all([
-          fetchSeriesDaily(priceTabVariety, "GMML_Lima"),
-          fetchForecast(priceTabVariety, "GMML_Lima", lang),
+          fetchSeriesDaily(priceTabVariety, selectedMarket),
+          fetchForecast(priceTabVariety, selectedMarket, lang),
         ]);
         if (!cancelled) {
-          setPriceSeries(series.slice(-21));
+          setPriceSeriesAll(series);
           setPriceForecast(fc);
         }
       } catch {
         if (!cancelled) {
-          setPriceSeries([]);
+          setPriceSeriesAll([]);
           setPriceForecast(null);
         }
       } finally {
@@ -341,7 +418,7 @@ export default function RuralPricingApp() {
     return () => {
       cancelled = true;
     };
-  }, [tab, priceTabVariety, lang]);
+  }, [tab, priceTabVariety, lang, selectedMarket]);
 
   const filteredCrops = useMemo(() => {
     const cleanSearch = searchTerm.trim().toLowerCase();
@@ -354,10 +431,31 @@ export default function RuralPricingApp() {
   const activeCrop = selectedCrop ?? crops[0] ?? STATIC_DEMO[0];
   const suggestedPrice = activeCrop.today + qualityBonus;
   const profit = Math.max(0, (suggestedPrice - costPerKg) * quantity);
-  const fairRangePercent = Math.min(
-    100,
-    Math.max(0, ((suggestedPrice - activeCrop.fair[0]) / (activeCrop.fair[1] - activeCrop.fair[0])) * 100)
-  );
+  const fairSpan = activeCrop.fair[1] - activeCrop.fair[0];
+  const fairRangePercent =
+    fairSpan > 1e-6
+      ? Math.min(100, Math.max(0, ((suggestedPrice - activeCrop.fair[0]) / fairSpan) * 100))
+      : 50;
+
+  const priceSeries21 = useMemo(() => priceSeriesAll.slice(-21), [priceSeriesAll]);
+
+  const onBellNotifications = useCallback(async () => {
+    if (!notifSupported || notifPermission === "unsupported") {
+      setTab("home");
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    setNotifPermission(perm);
+    if (perm === "granted") {
+      try {
+        new Notification(L(labels, "notif_demo_title", "Alertas del mercado"), {
+          body: L(labels, "notif_demo_body", "Le avisaremos cuando revise precios y datos nuevos."),
+        });
+      } catch {
+        /* WebView may block */
+      }
+    }
+  }, [notifSupported, notifPermission, labels]);
 
   const alerts = useMemo(() => {
     const fb = [
@@ -419,7 +517,7 @@ export default function RuralPricingApp() {
   }, [tab, activeCrop]);
 
   const headerBlock = (
-    <header className="relative overflow-hidden bg-gradient-to-br from-emerald-700 to-lime-600 px-5 pb-7 pt-9 text-white">
+    <header className="relative overflow-hidden bg-gradient-to-br from-emerald-700 to-lime-600 px-4 pb-6 pt-[max(1.25rem,env(safe-area-inset-top))] text-white sm:px-5 sm:pb-7">
       <div className="absolute -right-12 -top-14 h-40 w-40 rounded-full bg-white/10" />
       <div className="absolute -bottom-10 left-8 h-28 w-28 rounded-full bg-white/10" />
 
@@ -446,9 +544,14 @@ export default function RuralPricingApp() {
           </div>
           <button
             type="button"
-            onClick={() => setTab("home")}
+            onClick={() => void onBellNotifications()}
             className="rounded-2xl bg-white/15 p-3 backdrop-blur transition hover:bg-white/25"
-            aria-label={L(labels, "alerts_aria", "Ver alertas")}
+            aria-label={L(labels, "alerts_aria", "Activar alertas")}
+            title={
+              notifPermission === "granted"
+                ? L(labels, "notif_on", "Notificaciones activadas")
+                : L(labels, "notif_tap", "Toque para permitir avisos")
+            }
           >
             <span className="text-lg leading-none" aria-hidden="true">
               🔔
@@ -457,23 +560,54 @@ export default function RuralPricingApp() {
         </div>
       </div>
 
-      <div className="relative z-10 mt-5 flex items-center gap-2 rounded-2xl bg-white/15 px-3 py-2 text-sm backdrop-blur">
-        <span className="shrink-0 text-base leading-none" aria-hidden="true">
-          📍
-        </span>
-        <span>
-          {loading
-            ? L(labels, "status_loading", "Cargando datos del servidor…")
-            : loadError
-              ? L(labels, "status_demo", "Modo demo").replace("{error}", loadError)
-              : L(labels, "status_ok", "GMML Lima · Datos del backend")}
-        </span>
+      <div className="relative z-10 mt-5 flex flex-col gap-2 rounded-2xl bg-white/15 px-3 py-2 text-sm backdrop-blur">
+        <div className="flex items-center gap-2">
+          <span className="shrink-0 text-base leading-none" aria-hidden="true">
+            📍
+          </span>
+          {marketsList.length > 1 ? (
+            <label className="flex min-w-0 flex-1 flex-col gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-white/70">
+                {L(labels, "location_pick", "Mercado / ubicación")}
+              </span>
+              <select
+                className="w-full rounded-xl border border-white/25 bg-white/95 px-2 py-2 text-sm font-semibold text-emerald-900"
+                value={selectedMarket}
+                onChange={(e) => setSelectedMarket(e.target.value)}
+                aria-label={L(labels, "location_pick", "Mercado")}
+              >
+                {marketsList.map((m) => (
+                  <option key={m} value={m}>
+                    {formatMarketLabel(m)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <span className="font-medium">
+              {loading
+                ? L(labels, "status_loading", "Cargando datos del servidor…")
+                : loadError
+                  ? L(labels, "status_demo", "Modo demo").replace("{error}", loadError)
+                  : `${formatMarketLabel(selectedMarket)} · ${L(labels, "status_backend", "Datos del backend")}`}
+            </span>
+          )}
+        </div>
+        {marketsList.length > 1 && (
+          <p className="pl-7 text-[11px] leading-snug text-white/75">
+            {loading
+              ? L(labels, "status_loading", "Cargando datos del servidor…")
+              : loadError
+                ? L(labels, "status_demo", "Modo demo").replace("{error}", loadError)
+                : L(labels, "status_backend_hint", "Precios y pronóstico usan el mercado elegido.")}
+          </p>
+        )}
       </div>
     </header>
   );
 
   const homeMain = (
-    <main className="space-y-5 px-5 pt-5">
+    <main className="space-y-5 px-4 pt-4 sm:px-5 sm:pt-5">
       <Card className="rounded-3xl border-0 bg-white shadow-lg">
         <CardContent className="p-4">
           <label className="flex items-center gap-3 rounded-2xl bg-slate-100 px-3 py-2">
@@ -535,8 +669,18 @@ export default function RuralPricingApp() {
             <div className="bg-gradient-to-br from-amber-200 to-lime-100 p-5">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold text-slate-600">{L(labels, "recommended_price", "Precio recomendado")}</p>
+                  <p className="text-sm font-semibold text-slate-600">{L(labels, "recommended_price", "Referencia sugerida")}</p>
                   <h2 className="mt-1 text-4xl font-black">{soles(suggestedPrice)}</h2>
+                  <p className="mt-1 text-sm font-bold text-emerald-900">
+                    {L(labels, "negotiate_range_short", "Negocia entre")}{" "}
+                    <span className="whitespace-nowrap">{soles(activeCrop.fair[0])}</span>
+                    {" – "}
+                    <span className="whitespace-nowrap">{soles(activeCrop.fair[1])}</span>
+                    <span className="font-semibold text-slate-700">
+                      {" "}
+                      / {activeCrop.unit}
+                    </span>
+                  </p>
                   <p className="mt-1 text-sm text-slate-700">
                     {L(labels, "per_unit_por", "por")} {activeCrop.unit} · {activeCrop.market}
                   </p>
@@ -549,7 +693,7 @@ export default function RuralPricingApp() {
 
               <div className="mt-5 rounded-3xl bg-white/80 p-4 shadow-sm">
                 <div className="mb-2 flex justify-between gap-2 text-sm">
-                  <span className="font-semibold">{L(labels, "fair_range_title", "Rango (7 días)")}</span>
+                  <span className="font-semibold">{L(labels, "fair_range_title", "Banda modelo (7 días)")}</span>
                   <span className="text-right">
                     {soles(activeCrop.fair[0])} - {soles(activeCrop.fair[1])}
                   </span>
@@ -705,26 +849,55 @@ export default function RuralPricingApp() {
   );
 
   const marketsMain = (
-    <main className="space-y-4 px-5 pt-5 pb-6">
+    <main className="space-y-4 px-4 pt-4 pb-4 sm:px-5 sm:pt-5 sm:pb-6">
       <h2 className="text-lg font-bold text-slate-900">{L(labels, "markets_title", "Mercados")}</h2>
       <p className="text-sm text-slate-600">{L(labels, "markets_intro", "")}</p>
       {marketsData.sources && (
         <Card className="rounded-3xl border-0 bg-white shadow-lg">
           <CardContent className="space-y-3 p-4">
-            <h3 className="text-sm font-bold text-emerald-800">{L(labels, "markets_sources", "Fuentes")}</h3>
-            {Object.entries(marketsData.sources.urls).map(([k, url]) => (
+            <h3 className="text-sm font-bold text-emerald-800">{L(labels, "markets_sources", "Fuentes MIDAGRI / SISAP")}</h3>
+            {(marketsData.sources.links?.length
+              ? marketsData.sources.links
+              : Object.entries(marketsData.sources.urls).map(([id, url]) => ({ id, title: id, url }))
+            ).map((link) => (
               <a
-                key={k}
-                href={url}
+                key={link.id}
+                href={link.url}
                 target="_blank"
-                rel="noreferrer"
-                className="flex items-center justify-between rounded-2xl bg-slate-50 px-3 py-3 text-sm font-semibold text-emerald-800 hover:bg-emerald-50"
+                rel="noopener noreferrer"
+                className="flex items-center justify-between gap-2 rounded-2xl bg-slate-50 px-3 py-3 text-sm font-semibold text-emerald-800 hover:bg-emerald-50"
               >
-                <span className="truncate pr-2">{k}</span>
-                <span>{L(labels, "markets_open", "Abrir")} ›</span>
+                <span className="min-w-0 flex-1 leading-snug">{link.title}</span>
+                <span className="shrink-0">{L(labels, "markets_open", "Abrir enlace")} ›</span>
               </a>
             ))}
             <p className="text-xs text-slate-500">{marketsData.sources.attribution}</p>
+          </CardContent>
+        </Card>
+      )}
+      {marketsData.ingest && marketsData.ingest.length > 0 && (
+        <Card className="rounded-3xl border-0 bg-white shadow-lg">
+          <CardContent className="space-y-2 p-4">
+            <h3 className="text-sm font-bold text-emerald-800">{L(labels, "markets_updates", "Actualizaciones de datos")}</h3>
+            <p className="text-xs text-slate-600">{L(labels, "markets_updates_hint", "Últimas cargas al servidor (hora local).")}</p>
+            <ul className="max-h-56 space-y-2 overflow-y-auto text-xs">
+              {marketsData.ingest.map((run) => (
+                <li
+                  key={run.id}
+                  className="flex flex-col gap-0.5 rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <span className="font-semibold text-slate-800">{run.source}</span>
+                  <span className="text-slate-600">{formatRunTimestamp(run.finished_at ?? run.started_at)}</span>
+                  <span
+                    className={`font-bold uppercase tracking-wide ${
+                      run.status === "ok" ? "text-emerald-700" : run.status === "running" ? "text-amber-700" : "text-red-700"
+                    }`}
+                  >
+                    {run.status}
+                  </span>
+                </li>
+              ))}
+            </ul>
           </CardContent>
         </Card>
       )}
@@ -751,7 +924,7 @@ export default function RuralPricingApp() {
   );
 
   const priceMain = (
-    <main className="space-y-4 px-5 pt-5 pb-6">
+    <main className="space-y-4 px-4 pt-4 pb-4 sm:px-5 sm:pt-5 sm:pb-6">
       <h2 className="text-lg font-bold">{L(labels, "price_title", "Precio")}</h2>
       <p className="text-sm text-slate-600">{L(labels, "price_subtitle", "")}</p>
       <label className="block text-sm font-semibold text-slate-700">{L(labels, "price_pick", "Variedad")}</label>
@@ -774,7 +947,47 @@ export default function RuralPricingApp() {
         <p className="text-sm text-slate-500">…</p>
       ) : (
         <>
-          <h3 className="text-sm font-bold text-emerald-800">{L(labels, "price_last_days", "Últimos días")}</h3>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              className="h-10 flex-1 rounded-2xl border border-emerald-200 bg-white text-xs font-bold text-emerald-900 sm:flex-none"
+              disabled={!priceTabVariety || priceSeries21.length === 0}
+              onClick={() => {
+                const csv = buildPriceForecastCsv({
+                  variety: priceTabVariety,
+                  market: selectedMarket,
+                  series: priceSeries21,
+                  horizons: priceForecast?.horizons,
+                });
+                const safe = priceTabVariety.replace(/\s+/g, "_");
+                downloadTextFile(`precio_${safe}_${selectedMarket}.csv`, csv, "text/csv;charset=utf-8");
+              }}
+            >
+              {L(labels, "export_csv", "Descargar CSV")}
+            </Button>
+            <Button
+              type="button"
+              className="h-10 flex-1 rounded-2xl bg-emerald-700 text-xs font-bold text-white hover:bg-emerald-800 sm:flex-none"
+              disabled={!priceTabVariety || priceSeries21.length === 0}
+              onClick={() => {
+                downloadPriceForecastXlsx(`precio_${priceTabVariety.replace(/\s+/g, "_")}_${selectedMarket}.xlsx`, {
+                  variety: priceTabVariety,
+                  market: selectedMarket,
+                  series: priceSeries21,
+                  horizons: priceForecast?.horizons,
+                });
+              }}
+            >
+              {L(labels, "export_xlsx", "Descargar Excel")}
+            </Button>
+          </div>
+          <PriceTrendChart
+            series={priceSeries21}
+            horizons={priceForecast?.horizons}
+            pastLabel={L(labels, "chart_past", "Precio observado")}
+            forecastLabel={L(labels, "chart_forecast", "Tendencia pronóstico")}
+          />
+          <h3 className="text-sm font-bold text-emerald-800">{L(labels, "price_last_days", "Últimos 21 días")}</h3>
           <div className="max-h-48 overflow-y-auto rounded-2xl border border-slate-100 bg-white">
             <table className="w-full text-left text-xs">
               <thead className="sticky top-0 bg-slate-50 text-slate-600">
@@ -784,7 +997,7 @@ export default function RuralPricingApp() {
                 </tr>
               </thead>
               <tbody>
-                {[...priceSeries].reverse().map((row) => (
+                {[...priceSeries21].reverse().map((row) => (
                   <tr key={row.ds} className="border-t border-slate-100">
                     <td className="p-2">{row.ds}</td>
                     <td className="p-2 font-semibold">{soles(row.price_soles_per_kg)}</td>
@@ -822,7 +1035,7 @@ export default function RuralPricingApp() {
   );
 
   const salesMain = (
-    <main className="space-y-4 px-5 pt-5 pb-6">
+    <main className="space-y-4 px-4 pt-4 pb-4 sm:px-5 sm:pt-5 sm:pb-6">
       <h2 className="text-lg font-bold">{L(labels, "sales_title", "Mis ventas")}</h2>
       <p className="text-sm leading-relaxed text-slate-600">{L(labels, "sales_subtitle", "")}</p>
       <Card className="rounded-3xl border-0 bg-white shadow-lg">
@@ -909,23 +1122,28 @@ export default function RuralPricingApp() {
   );
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-emerald-100 via-lime-50 to-amber-50 p-4 text-slate-900">
-      <div className="mx-auto flex min-h-[860px] max-w-[410px] items-center justify-center">
-        <div className="relative h-[840px] w-full overflow-hidden rounded-[2.4rem] border-[10px] border-slate-950 bg-slate-50 shadow-2xl">
-          <div className="absolute left-1/2 top-0 z-20 h-6 w-36 -translate-x-1/2 rounded-b-2xl bg-slate-950" />
+    <>
+      <div className="fixed inset-0 flex flex-col bg-gradient-to-br from-emerald-100 via-lime-50 to-amber-50 text-slate-900">
+        <div
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))] pl-[env(safe-area-inset-left,0px)] pr-[env(safe-area-inset-right,0px)]"
+          style={{ WebkitOverflowScrolling: "touch" }}
+        >
+          {headerBlock}
+          {tab === "home" && homeMain}
+          {tab === "markets" && marketsMain}
+          {tab === "price" && priceMain}
+          {tab === "sales" && salesMain}
+        </div>
 
-          <div className="h-full overflow-y-auto pb-28">
-            {headerBlock}
-            {tab === "home" && homeMain}
-            {tab === "markets" && marketsMain}
-            {tab === "price" && priceMain}
-            {tab === "sales" && salesMain}
-          </div>
+        <BottomNav tab={tab} onChange={setTab} labels={labels} />
+      </div>
 
-          <BottomNav tab={tab} onChange={setTab} labels={labels} />
-
-          {negotiateOpen && (
-            <div className="absolute inset-0 z-40 flex items-end justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+      {negotiateOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-4 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          role="dialog"
+          aria-modal="true"
+        >
               <div className="max-h-[85%] w-full overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl">
                 <h3 className="text-lg font-bold text-slate-900">{L(labels, "negotiate_title", "Negociar")}</h3>
                 <p className="mt-1 text-sm text-slate-600">{L(labels, "negotiate_hint", "")}</p>
@@ -956,11 +1174,15 @@ export default function RuralPricingApp() {
                   </Button>
                 </div>
               </div>
-            </div>
-          )}
+        </div>
+      )}
 
-          {costEditorOpen && (
-            <div className="absolute inset-0 z-40 flex items-end justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+      {costEditorOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-4 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          role="dialog"
+          aria-modal="true"
+        >
               <div className="w-full rounded-3xl bg-white p-5 shadow-2xl">
                 <h3 className="text-lg font-bold">{L(labels, "edit_costs", "Costos")}</h3>
                 <div className="mt-3 space-y-3">
@@ -986,10 +1208,8 @@ export default function RuralPricingApp() {
                   {L(labels, "negotiate_close", "Listo")}
                 </Button>
               </div>
-            </div>
-          )}
         </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }

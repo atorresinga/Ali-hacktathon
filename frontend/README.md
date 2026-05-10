@@ -9,7 +9,7 @@ Merged from the pulled mobile UI and wired to the **FastAPI backend** (`/api/v1`
 
 Vite proxies `/api` → `http://127.0.0.1:8000`, so the browser calls same-origin `/api/v1/...`.
 
-The app is served under **`/app/`** (see `base` in `vite.config.ts`). In dev open **http://127.0.0.1:5173/app/** (not the bare root).
+Vite uses **`base: './'`** so assets work in Capacitor. In dev open **http://127.0.0.1:5173/** (backend API proxy still targets port **8000**).
 
 ## Production API URL
 

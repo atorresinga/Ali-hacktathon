@@ -34,6 +34,13 @@ def daily_price_volume(
     return df.reset_index()
 
 
+def list_markets(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT market FROM observations ORDER BY market"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def list_varieties(conn: sqlite3.Connection, market: str | None = None) -> list[str]:
     if market:
         rows = conn.execute(

@@ -105,8 +105,11 @@ export async function fetchDataHealth(lang = "es"): Promise<DataHealth> {
   return j.data_health;
 }
 
+export type SourceLink = { id: string; title: string; url: string };
+
 export type SourcesResponse = {
   urls: Record<string, string>;
+  links?: SourceLink[];
   attribution: string;
 };
 
@@ -114,4 +117,29 @@ export async function fetchSources(lang = "es"): Promise<SourcesResponse> {
   const r = await fetch(`${API_BASE}/api/v1/config/sources?lang=${encodeURIComponent(lang)}`);
   if (!r.ok) throw new Error(`sources ${r.status}`);
   return r.json() as Promise<SourcesResponse>;
+}
+
+export async function fetchMarkets(lang = "es"): Promise<string[]> {
+  const r = await fetch(`${API_BASE}/api/v1/meta/markets?lang=${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(`markets ${r.status}`);
+  const j = (await r.json()) as { markets: string[] };
+  return j.markets;
+}
+
+export type IngestRun = {
+  id: number;
+  source: string;
+  status: string;
+  detail: string | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
+export async function fetchIngestRecent(lang = "es", limit = 25): Promise<IngestRun[]> {
+  const r = await fetch(
+    `${API_BASE}/api/v1/meta/ingest-recent?limit=${limit}&lang=${encodeURIComponent(lang)}`
+  );
+  if (!r.ok) throw new Error(`ingest ${r.status}`);
+  const j = (await r.json()) as { runs: IngestRun[] };
+  return j.runs;
 }

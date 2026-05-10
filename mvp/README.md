@@ -31,7 +31,7 @@ Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs). Example: `GET /ap
 cd frontend && npm install && npm run dev
 ```
 
-Keep the backend on port **8000**; Vite (default **5173**) proxies `/api` to the backend. Open the UI at **http://127.0.0.1:5173/app/**. Details: [frontend/README.md](../frontend/README.md).
+Keep the backend on port **8000**; Vite (default **5173**) proxies `/api` to the backend. Open **http://127.0.0.1:5173/**. Same UI is bundled for iOS via Capacitor — see [../IOS.md](../IOS.md). Web alternate: **http://127.0.0.1:8000/app/** after `frontend` build + backend static mount.
 
 **Optional:** `pip install -e ".[ui]"` adds Streamlit for experiments only.
 

@@ -1,0 +1,15 @@
+{
+  "name": "ali-hacktathon",
+  "private": true,
+  "scripts": {
+    "build:frontend": "npm run build --prefix frontend",
+    "cap:sync": "npm run build:frontend && npx cap sync ios",
+    "cap:open": "npx cap open ios",
+    "ios:run": "npm run cap:sync && npx cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/cli": "^8.3.3",
+    "@capacitor/core": "^8.3.3",
+    "@capacitor/ios": "^8.3.3"
+  }
+}
